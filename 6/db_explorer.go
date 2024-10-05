@@ -102,6 +102,32 @@ func getColumns(tableName string, db *sql.DB) (map[string]ColumnMeta, error) {
 		columnMeta := ColumnMeta{field.String, columnType.String, null.String, key.String, extra.String, ""}
 		columns[field.String] = columnMeta
 	}
+
+	r, e := db.Query(fmt.Sprintf("SELECT * FROM `%s` LIMIT 0", tableName))
+	ctypes, e := r.ColumnTypes()
+	if e != nil {
+		fmt.Println(e)
+		return nil, e
+	}
+
+	for _, colType := range ctypes {
+		colName := colType.Name()
+		var goType string
+		scanType := colType.ScanType()
+		if scanType.Kind() == reflect.Struct {
+			// Only nullable
+			if scanType.NumField() == 2 && scanType.Field(1).Name == "Valid" {
+				field := scanType.Field(0)
+				goType = field.Type.String()
+			}
+		} else {
+			goType = scanType.Kind().String()
+		}
+		col := columns[colName]
+		col.GoType = goType
+		columns[colName] = col
+	}
+	defer r.Close()
 	return columns, err
 }
 
@@ -185,12 +211,7 @@ func addRow(ctx context.Context, r *http.Request, db *sql.DB) Response {
 			if structure.Nullable == "YES" {
 				continue
 			} else {
-				t := sqlToGoType(structure.Type)
-				if t == "string" {
-					value = ""
-				} else if t == "float64" {
-					value = 0
-				}
+				value = getDefaultValue(structure.GoType)
 			}
 		}
 		if strings.Contains(structure.Extra, "auto_increment") {
@@ -304,7 +325,7 @@ func updateRow(ctx context.Context, r *http.Request, db *sql.DB) Response {
 				return Response{http.StatusBadRequest, nil, fmt.Errorf("field %s have invalid type", key)}
 			}
 		} else {
-			isValid := validateType(reflect.ValueOf(val).Type(), colMeta.Type)
+			isValid := reflect.ValueOf(val).Type().String() == colMeta.GoType
 			if !isValid {
 				return Response{http.StatusBadRequest, nil, fmt.Errorf("field %s have invalid type", key)}
 			}
@@ -437,34 +458,27 @@ func getTable(ctx context.Context, r *http.Request, db *sql.DB) Response {
 	return Response{http.StatusOK, recordsMap, err}
 }
 
-func validateType(dataType reflect.Type, sqlType string) bool {
-	dt := dataType.Kind().String()
-	switch dt {
-	case "string":
-		if strings.Contains(sqlType, "varchar") {
-			return true
-		} else if strings.Contains(sqlType, "text") {
-			return true
-		}
+func getDefaultValue(goType string) any {
+	switch goType {
+	case "int8":
+		return 0
+	case "int16":
+		return 0
+	case "int32":
+		return 0
+	case "int64":
+		return 0
+	case "float32":
+		return 0.0
 	case "float64":
-		if strings.Contains(sqlType, "int") {
-			return true
-		}
+		return 0.0
+	case "string":
+		return ""
+	case "bool":
+		return false
 	}
-	return false
-}
 
-func sqlToGoType(sqlType string) string {
-	if strings.Contains(sqlType, "varchar") {
-		return "string"
-	}
-	if strings.Contains(sqlType, "text") {
-		return "string"
-	}
-	if strings.Contains(sqlType, "int") {
-		return "float64"
-	}
-	return "nil"
+	return nil
 }
 
 func rootHandler(ctx context.Context, w http.ResponseWriter, r *http.Request, db *sql.DB) {
